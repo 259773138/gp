@@ -77,16 +77,29 @@ python main.py --mode demo        # 离线演示（合成数据，无需行情�
 python main.py --mode once --limit 10   # 调试：只跑前 10 支股票
 ```
 
-## ⚙️ 自动化部署说明
+## ⚙️ 自动化部署说明（两步一次性设置）
 
-- **数据源**：`akshare`（东方财富/新浪），GitHub Actions 海外 Runner 偶发限流时，
-  在 Actions 页手动 `Re-run` 即可；
-- **定时触发**：GitHub 的 `schedule` 只在**默认分支（main）**生效，合并 PR 后自动按
-  cron 运行；当前分支可随时在 Actions 页手动触发（`workflow_dispatch`）；
+> 受当前 GitHub App 授权范围限制，以下两步需要在网页端各点一次（共约 1 分钟）：
+
+**第 1 步：启用工作流**
+仓库的 `deploy/daily_scan.yml` 就是定时任务配置，复制到
+`.github/workflows/daily_scan.yml` 即可（在 GitHub 网页 Add file 粘贴提交，
+或本地 `mkdir -p .github/workflows && cp deploy/daily_scan.yml .github/workflows/`）。
+
+**第 2 步：开启 Pages**
+仓库 Settings → Pages → Source 选 `Deploy from a branch`，
+Branch 选 `main`（或本工作分支）+ `/docs` 目录，Save。
+约 1 分钟后站点上线：https://259773138.github.io/gp/
+
+其余全部自动：
+
+- **定时触发**：GitHub 的 `schedule` 只在**默认分支（main）**生效，合并 PR 后
+  每个交易日 15:30（北京时间）自动运行；任何分支也可在 Actions 页手动触发；
+- **数据源**：`akshare`（东方财富/新浪），海外 Runner 偶发限流时 Re-run 即可；
 - **数据持久化**：`stock_screener/data/screener.db`（筛选/回测历史）与
   `learned_weights.json`（最新自适应权重）由工作流自动提交回仓库，
   使每天的任务在昨天基础上持续进化；
-- **Pages**：源为仓库 `docs/` 目录，已含 `.nojekyll`。
+- **Pages**：源为 `docs/` 目录，已含 `.nojekyll`。
 
 ## ⚠️ 免责声明
 
