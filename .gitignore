@@ -1,0 +1,17 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+
+# 演示模式产物（不入库）
+stock_screener/data/demo.db
+stock_screener/data/demo_weights.json
+stock_screener/preview_site/
+
+# 一次性输出产物（Excel/图表，体积大且可再生）
+stock_screener/output/
+
+# 注意：以下文件是 GitHub Actions 的持久化状态，需要入库提交，
+# 以便定时任务之间延续历史数据：
+#   stock_screener/data/screener.db          （筛选与回测历史）
+#   stock_screener/data/learned_weights.json （最新的自适应权重）
