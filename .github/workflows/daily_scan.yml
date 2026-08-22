@@ -1,0 +1,52 @@
+name: 每日A股扫描与自适应权重训练
+
+on:
+  schedule:
+    # 北京时间 15:30 = UTC 07:30，周一至周五（A股收盘后）
+    - cron: "30 7 * * 1-5"
+  workflow_dispatch:   # 支持随时手动触发
+
+permissions:
+  contents: write      # 回写数据与 docs/ 站点需要
+
+concurrency:
+  group: daily-scan
+  cancel-in-progress: false
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: 检出仓库
+        uses: actions/checkout@v4
+
+      - name: 设置 Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: stock_screener/requirements.txt
+
+      - name: 安装依赖
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r stock_screener/requirements.txt
+
+      - name: 执行每日完整分析（筛选+回测+自适应权重+建站）
+        working-directory: stock_screener
+        run: python main.py --mode once
+
+      - name: 回写数据库、权重与网站
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add stock_screener/data/screener.db \
+                  stock_screener/data/learned_weights.json \
+                  docs/ || true
+          if git diff --cached --quiet; then
+            echo "无变更，跳过提交"
+          else
+            git commit -m "chore: 每日扫描与自适应权重更新 $(date -u +'%Y-%m-%d %H:%M UTC') [skip ci]"
+            git push origin HEAD:${{ github.ref_name }}
+          fi
