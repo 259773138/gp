@@ -18,11 +18,17 @@ from config import STOCK_POOL_CONFIG, DATA_CONFIG
 class DataFetcher:
     """数据获取器"""
 
+    # K线数据源（按优先级）：em=东方财富 tx=腾讯 sina=新浪
+    # 海外 Runner 访问东财/新浪可能被按 IP 段拒绝，运行期自动切换到可用源并"粘住"
+    KLINE_SOURCES = ["em", "tx", "sina"]
+
     def __init__(self):
         self.stock_pool = pd.DataFrame()
         self.kline_cache: Dict[str, pd.DataFrame] = {}
         self.weekly_cache: Dict[str, pd.DataFrame] = {}
         self.basic_info_cache: Dict[str, dict] = {}
+        self.kline_source_idx = 0        # 当前粘性数据源下标
+        self.dead_sources = set()        # 本次运行中已确认不可用的源
 
     # ========================================
     # 1. 构建股票池
@@ -98,19 +104,70 @@ class DataFetcher:
             print(f"    ❌ 失败: {e}")
         return pd.DataFrame(columns=["code", "name", "source"])
 
+    def _spot_snapshot(self) -> Optional[pd.DataFrame]:
+        """全市场实时快照（东财 → 新浪 备用；统一列结构并缓存）"""
+        if getattr(self, "_spot_cache", None) is not None:
+            return self._spot_cache
+
+        # 1) 东方财富（含 PE/PB/市值/换手率）
+        try:
+            df = ak.stock_zh_a_spot_em()
+            if df is not None and not df.empty:
+                self._spot_cache = pd.DataFrame({
+                    "code": df["代码"].astype(str).str.zfill(6),
+                    "name": df["名称"],
+                    "price": pd.to_numeric(df["最新价"], errors="coerce"),
+                    "pct_change": pd.to_numeric(df["涨跌幅"], errors="coerce"),
+                    "volume": pd.to_numeric(df["成交量"], errors="coerce"),
+                    "amount": pd.to_numeric(df["成交额"], errors="coerce"),
+                    "turnover": pd.to_numeric(df.get("换手率", pd.Series(dtype=float)), errors="coerce"),
+                    "pe": pd.to_numeric(df.get("市盈率-动态", pd.Series(dtype=float)), errors="coerce"),
+                    "pb": pd.to_numeric(df.get("市净率", pd.Series(dtype=float)), errors="coerce"),
+                    "total_mv": pd.to_numeric(df.get("总市值", pd.Series(dtype=float)), errors="coerce"),
+                    "circ_mv": pd.to_numeric(df.get("流通市值", pd.Series(dtype=float)), errors="coerce"),
+                })
+                return self._spot_cache
+        except Exception as e:
+            print(f"    ⚠️ 东财实时快照不可用: {str(e)[:60]}")
+
+        # 2) 新浪备用（无 PE/PB/市值，其余字段可恢复；全市场约 60 秒）
+        try:
+            print("    🔀 尝试新浪全市场快照（约1分钟）...")
+            df = ak.stock_zh_a_spot()
+            if df is not None and not df.empty:
+                self._spot_cache = pd.DataFrame({
+                    "code": df["代码"].astype(str).str.zfill(6),
+                    "name": df["名称"],
+                    "price": pd.to_numeric(df["最新价"], errors="coerce"),
+                    "pct_change": pd.to_numeric(df["涨跌幅"], errors="coerce"),
+                    "volume": pd.to_numeric(df["成交量"], errors="coerce"),
+                    "amount": pd.to_numeric(df["成交额"], errors="coerce"),
+                    "turnover": np.nan,
+                    "pe": np.nan,
+                    "pb": np.nan,
+                    "total_mv": np.nan,
+                    "circ_mv": np.nan,
+                })
+                return self._spot_cache
+        except Exception as e:
+            print(f"    ⚠️ 新浪实时快照也不可用: {str(e)[:60]}")
+
+        self._spot_cache = pd.DataFrame()
+        return self._spot_cache
+
     def _get_extreme_stocks(self) -> pd.DataFrame:
         try:
             print("  📌 获取涨跌极端股票...")
-            df = ak.stock_zh_a_spot_em()
+            df = self._spot_snapshot()
             if df is not None and not df.empty:
-                df = df.dropna(subset=["涨跌幅"])
+                df = df.dropna(subset=["pct_change"])
                 extreme = pd.concat([
-                    df.nlargest(20, "涨跌幅"),
-                    df.nsmallest(20, "涨跌幅")
+                    df.nlargest(20, "pct_change"),
+                    df.nsmallest(20, "pct_change")
                 ])
                 result = pd.DataFrame({
-                    "code": extreme["代码"].astype(str).str.zfill(6),
-                    "name": extreme["名称"],
+                    "code": extreme["code"].astype(str).str.zfill(6),
+                    "name": extreme["name"],
                     "source": "涨跌极端"
                 })
                 print(f"    ✅ {len(result)} 支")
@@ -122,18 +179,18 @@ class DataFetcher:
     def _supplement_stocks(self, existing_pool: pd.DataFrame) -> pd.DataFrame:
         try:
             print("  📌 补充活跃股票...")
-            df = ak.stock_zh_a_spot_em()
+            df = self._spot_snapshot()
             if df is not None and not df.empty:
                 existing_codes = set(existing_pool["code"].values)
-                df = df[~df["代码"].astype(str).str.zfill(6).isin(existing_codes)]
-                df = df.dropna(subset=["成交额"]).sort_values("成交额", ascending=False)
+                df = df[~df["code"].astype(str).str.zfill(6).isin(existing_codes)]
+                df = df.dropna(subset=["amount"]).sort_values("amount", ascending=False)
                 need = STOCK_POOL_CONFIG["min_pool_size"] - len(existing_pool) + 20
                 supplement = df.head(need)
                 if supplement.empty:
                     return pd.DataFrame(columns=["code", "name", "source"])
                 result = pd.DataFrame({
-                    "code": supplement["代码"].astype(str).str.zfill(6),
-                    "name": supplement["名称"],
+                    "code": supplement["code"].astype(str).str.zfill(6),
+                    "name": supplement["name"],
                     "source": "活跃补充"
                 })
                 print(f"    ✅ 补充 {len(result)} 支")
@@ -172,8 +229,76 @@ class DataFetcher:
                 else:
                     return None
 
+    # ========================================
+    # 2.1 K线多源获取（东财 → 腾讯 → 新浪，自动切换）
+    # ========================================
+    @staticmethod
+    def _prefixed_code(code: str) -> str:
+        """600519 -> sh600519；000001/300750 -> sz000001（腾讯/新浪需要带市场前缀）"""
+        return f"sh{code}" if code.startswith(("6", "5", "9")) else f"sz{code}"
+
+    def _kline_from_em(self, code: str, start_date: str, end_date: str) -> Optional[pd.DataFrame]:
+        """东方财富日线（原始实现）"""
+        df = ak.stock_zh_a_hist(symbol=code, period="daily",
+                                start_date=start_date, end_date=end_date, adjust="qfq")
+        if df is None or df.empty or len(df) < 60:
+            return None
+        df = df.rename(columns={
+            "日期": "date", "开盘": "open", "收盘": "close",
+            "最高": "high", "最低": "low", "成交量": "volume",
+            "成交额": "amount", "振幅": "amplitude",
+            "涨跌幅": "pct_change", "涨跌额": "price_change",
+            "换手率": "turnover_rate"
+        })
+        return df
+
+    def _kline_from_tx(self, code: str, start_date: str, end_date: str) -> Optional[pd.DataFrame]:
+        """腾讯日线：date/open/close/high/low/volume/turnover(小数)/amount"""
+        df = ak.stock_zh_a_hist_tx(symbol=self._prefixed_code(code),
+                                   start_date=start_date, end_date=end_date, adjust="qfq")
+        if df is None or df.empty or len(df) < 60:
+            return None
+        df["turnover_rate"] = pd.to_numeric(df.get("turnover"), errors="coerce") * 100
+        return df
+
+    def _kline_from_sina(self, code: str, start_date: str, end_date: str) -> Optional[pd.DataFrame]:
+        """新浪日线：date/open/high/low/close/volume/amount/outstanding_share/turnover(小数)"""
+        df = ak.stock_zh_a_daily(symbol=self._prefixed_code(code),
+                                 start_date=start_date, end_date=end_date, adjust="qfq")
+        if df is None or df.empty or len(df) < 60:
+            return None
+        df["turnover_rate"] = pd.to_numeric(df.get("turnover"), errors="coerce") * 100
+        return df
+
+    _KLINE_FETCHERS = {
+        "em": _kline_from_em,
+        "tx": _kline_from_tx,
+        "sina": _kline_from_sina,
+    }
+
+    def _normalize_kline(self, df: pd.DataFrame) -> pd.DataFrame:
+        """统一列结构：补齐可由 OHLCV 推导的衍生列，裁剪到配置长度"""
+        df["date"] = pd.to_datetime(df["date"])
+        for col in ("open", "close", "high", "low", "volume"):
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+        df = df.dropna(subset=["close"]).sort_values("date").reset_index(drop=True)
+
+        prev_close = df["close"].shift(1)
+        if "pct_change" not in df.columns or df["pct_change"].isna().all():
+            df["pct_change"] = (df["close"] / prev_close - 1) * 100
+        if "price_change" not in df.columns:
+            df["price_change"] = df["close"] - prev_close
+        if "amplitude" not in df.columns or df["amplitude"].isna().all():
+            df["amplitude"] = (df["high"] - df["low"]) / prev_close * 100
+        if "turnover_rate" not in df.columns:
+            df["turnover_rate"] = np.nan
+        if "amount" not in df.columns:
+            df["amount"] = np.nan
+
+        return df.tail(DATA_CONFIG["kline_days"]).reset_index(drop=True)
+
     def fetch_kline(self, code: str) -> Optional[pd.DataFrame]:
-        """获取日线数据"""
+        """获取日线数据（多源：优先当前粘性源，失败自动切换并记住可用源）"""
         if code in self.kline_cache:
             return self.kline_cache[code]
 
@@ -181,25 +306,40 @@ class DataFetcher:
         # 多取一些自然日，覆盖 kline_days 个交易日
         start_date = (datetime.now() - timedelta(days=int(DATA_CONFIG["kline_days"] * 1.8))).strftime("%Y%m%d")
 
-        def _fetch():
-            df = ak.stock_zh_a_hist(symbol=code, period="daily",
-                                    start_date=start_date, end_date=end_date, adjust="qfq")
-            if df is None or df.empty or len(df) < 60:
-                return None
+        # 尝试顺序：粘性源优先，跳过已确认死掉的源
+        order = [s for s in self.KLINE_SOURCES if s not in self.dead_sources]
+        sticky = self.KLINE_SOURCES[self.kline_source_idx]
+        if sticky in order:
+            order.remove(sticky)
+            order.insert(0, sticky)
 
-            df = df.rename(columns={
-                "日期": "date", "开盘": "open", "收盘": "close",
-                "最高": "high", "最低": "low", "成交量": "volume",
-                "成交额": "amount", "振幅": "amplitude",
-                "涨跌幅": "pct_change", "涨跌额": "price_change",
-                "换手率": "turnover_rate"
-            })
-            df["date"] = pd.to_datetime(df["date"])
-            df = df.sort_values("date").reset_index(drop=True)
-            df = df.tail(DATA_CONFIG["kline_days"]).reset_index(drop=True)
-            return df
+        df = None
+        for src in order:
+            fetcher = self._KLINE_FETCHERS[src]
+            for attempt in range(2):  # 每源最多试 2 次
+                try:
+                    raw = fetcher(self, code, start_date, end_date)
+                    if raw is not None:
+                        df = self._normalize_kline(raw)
+                        break
+                except Exception:
+                    pass
+                time.sleep(0.5)
+            if df is not None:
+                # 该源可用：粘住它
+                if self.KLINE_SOURCES[self.kline_source_idx] != src:
+                    print(f"  🔀 K线数据源切换: {self.KLINE_SOURCES[self.kline_source_idx]} → {src}")
+                    self.kline_source_idx = self.KLINE_SOURCES.index(src)
+                break
+            # 该源连试 2 次都失败：标记为死源（若其余源还有希望）
+            if len(self.dead_sources) < len(self.KLINE_SOURCES) - 1:
+                if src not in self.dead_sources:
+                    print(f"  ⚠️ K线数据源 {src} 不可用，切换备用源")
+                    self.dead_sources.add(src)
+            else:
+                print(f"  ⚠️ K线数据源 {src} 不可用（已无其他可用源）")
+                self.dead_sources.add(src)
 
-        df = self._fetch_with_retry(_fetch)
         if df is not None:
             self.kline_cache[code] = df
         return df
@@ -261,7 +401,15 @@ class DataFetcher:
                 fail += 1
 
             if (idx + 1) % 10 == 0 or idx == total - 1:
-                print(f"  进度: {idx+1}/{total} | ✅{success} ❌{fail}")
+                src = self.KLINE_SOURCES[self.kline_source_idx]
+                print(f"  进度: {idx+1}/{total} | ✅{success} ❌{fail} | 源:{src}")
+
+            # 快速失败：前 30 支全部失败说明所有数据源均被拒，继续跑只会浪费时间
+            if idx + 1 == 30 and success == 0:
+                raise RuntimeError(
+                    f"前 30 支股票 K 线全部获取失败（数据源 {self.KLINE_SOURCES} 均不可用）。"
+                    "可能是行情接口对当前 IP 限流/拒绝，请稍后 Re-run 或更换数据源。"
+                )
 
             time.sleep(DATA_CONFIG["fetch_interval"])
 
@@ -274,23 +422,11 @@ class DataFetcher:
     def fetch_realtime_quotes(self) -> pd.DataFrame:
         try:
             print("\n📊 获取实时行情...")
-            df = ak.stock_zh_a_spot_em()
-            if df is not None and not df.empty:
-                quotes = pd.DataFrame({
-                    "code": df["代码"].astype(str).str.zfill(6),
-                    "name": df["名称"],
-                    "price": pd.to_numeric(df["最新价"], errors="coerce"),
-                    "pct_change": pd.to_numeric(df["涨跌幅"], errors="coerce"),
-                    "volume": pd.to_numeric(df["成交量"], errors="coerce"),
-                    "amount": pd.to_numeric(df["成交额"], errors="coerce"),
-                    "turnover": pd.to_numeric(df["换手率"], errors="coerce"),
-                    "pe": pd.to_numeric(df.get("市盈率-动态", pd.Series(dtype=float)), errors="coerce"),
-                    "pb": pd.to_numeric(df.get("市净率", pd.Series(dtype=float)), errors="coerce"),
-                    "total_mv": pd.to_numeric(df.get("总市值", pd.Series(dtype=float)), errors="coerce"),
-                    "circ_mv": pd.to_numeric(df.get("流通市值", pd.Series(dtype=float)), errors="coerce"),
-                })
+            quotes = self._spot_snapshot()
+            if quotes is not None and not quotes.empty:
                 print(f"  ✅ {len(quotes)} 支")
                 return quotes
+            print("  ⚠️ 所有实时行情源不可用，继续（报告将缺少 PE/PB 等估值字段）")
         except Exception as e:
             print(f"  ❌ 失败: {e}")
         return pd.DataFrame()
