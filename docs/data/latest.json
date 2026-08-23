@@ -1,0 +1,29 @@
+{
+  "scan_date": "2026-08-23",
+  "generated_at": "2026-08-23T05:09:51",
+  "total": 1489,
+  "counts": {
+    "底部反转候选": 73,
+    "强势上涨趋势": 280,
+    "顶部风险警示": 136,
+    "弱势下跌趋势": 683,
+    "横盘震荡整理": 314,
+    "超跌反弹机会": 3
+  },
+  "model": {
+    "trained_at": "2026-08-23 03:51:38",
+    "n_train": 4745,
+    "n_test": 2063,
+    "n_dates": 267,
+    "label": "20日前瞻收益 > 0.0%",
+    "best_l2": 0.01,
+    "val_top_n_win_rate": 53.9,
+    "test_base_rate": 50.5,
+    "test_accuracy": 46.9,
+    "test_auc": 0.446,
+    "model_top_n_win_rate": 45.1,
+    "legacy_top_n_win_rate": 55.6,
+    "top_n": 10,
+    "win_rate_lift": -10.5
+  }
+}
